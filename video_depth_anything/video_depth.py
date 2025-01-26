@@ -19,12 +19,11 @@ import cv2
 from tqdm import tqdm
 import numpy as np
 import gc
+import os
 
 from .dinov2 import DINOv2
 from .dpt_temporal import DPTHeadTemporal
 from .util.transform import Resize, NormalizeImage, PrepareForNet
-
-from utils.util import compute_scale_and_shift, get_interpolate_frames
 
 # infer settings, do not change
 INFER_LEN = 32
@@ -62,10 +61,19 @@ class VideoDepthAnything(nn.Module):
         depth = self.head(features, patch_h, patch_w, T)[0]
         depth = F.interpolate(depth, size=(H, W), mode="bilinear", align_corners=True)
         depth = F.relu(depth)
+        # Fix reversed scale by inverting depth:
+        depth = 1.0 / (depth + 1e-6)
         return depth.squeeze(1).unflatten(0, (B, T)) # return shape [B, T, H, W]
+    
+    def infer_video_depth(self, video_path, output_dir, target_fps, input_size=518, device='cuda'):
+        os.makedirs(output_dir, exist_ok=True)
+        
+        cap = cv2.VideoCapture(video_path)
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fps = cap.get(cv2.CAP_PROP_FPS) if target_fps == -1 else target_fps
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    def infer_video_depth(self, frames, target_fps, input_size=518, device='cuda', fp32=False):
-        frame_height, frame_width = frames[0].shape[:2]
         ratio = max(frame_height, frame_width) / min(frame_height, frame_width)
         if ratio > 1.78:  # we recommend to process video with ratio smaller than 16:9 due to memory limitation
             input_size = int(input_size * 1.777 / ratio)
@@ -85,72 +93,108 @@ class VideoDepthAnything(nn.Module):
             PrepareForNet(),
         ])
 
-        frame_list = [frames[i] for i in range(frames.shape[0])]
         frame_step = INFER_LEN - OVERLAP
-        org_video_len = len(frame_list)
-        append_frame_len = (frame_step - (org_video_len % frame_step)) % frame_step + (INFER_LEN - frame_step)
-        frame_list = frame_list + [frame_list[-1].copy()] * append_frame_len
-
-        depth_list = []
         pre_input = None
-        for frame_id in tqdm(range(0, org_video_len, frame_step)):
+        frames_since_clear = 0
+        CLEAR_INTERVAL = 256
+        
+        # Track all frames for 1:1 correspondence
+        all_frames = []
+        frame_count = 0
+
+        # Set PyTorch memory settings
+        torch.cuda.set_per_process_memory_fraction(0.85)
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
+
+        # First pass: read all frames
+        pbar = tqdm(total=total_frames, desc="Reading frames")
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            all_frames.append(frame)
+            frame_count += 1
+            pbar.update(1)
+        cap.release()
+        pbar.close()
+
+        # Second pass: process frames ensuring 1:1 correspondence
+        pbar = tqdm(total=frame_count, desc="Processing depth")
+        saved_frame_count = 0
+        
+        for batch_idx, start_idx in enumerate(range(0, frame_count, frame_step)):
+            end_idx = min(start_idx + INFER_LEN, frame_count)
+            current_batch = all_frames[start_idx:end_idx]
+            
+            # Pad batch if needed
+            while len(current_batch) < INFER_LEN:
+                current_batch.append(current_batch[-1].copy())
+
             cur_list = []
-            for i in range(INFER_LEN):
-                cur_list.append(torch.from_numpy(transform({'image': frame_list[frame_id+i].astype(np.float32) / 255.0})['image']).unsqueeze(0).unsqueeze(0))
+            for frame in current_batch:
+                processed = transform({'image': frame.astype(np.float32) / 255.0})['image']
+                cur_list.append(torch.from_numpy(processed).unsqueeze(0).unsqueeze(0))
+                del processed
+            
             cur_input = torch.cat(cur_list, dim=1).to(device)
+            del cur_list
+
+            # Apply overlap for temporal consistency (but don't save overlapped frames)
             if pre_input is not None:
                 cur_input[:, :OVERLAP, ...] = pre_input[:, KEYFRAMES, ...]
 
             with torch.no_grad():
-                with torch.autocast(device_type=device, enabled=(not fp32)):
-                    depth = self.forward(cur_input) # depth shape: [1, T, H, W]
+                depth = self.forward(cur_input)
+                depth = F.interpolate(depth.flatten(0,1).unsqueeze(1), 
+                                   size=(frame_height, frame_width), 
+                                   mode='bilinear', 
+                                   align_corners=True)
+                
+                # For first batch, save all frames
+                # For subsequent batches, skip the overlapped frames
+                save_start = OVERLAP if batch_idx > 0 else 0
+                save_end = min(end_idx - start_idx, depth.shape[0])
+                
+                for i in range(save_start, save_end):
+                    frame_idx = start_idx + i
+                    if frame_idx < frame_count:
+                        depth_frame = depth[i][0].cpu().numpy()
+                        np.savez_compressed(
+                            os.path.join(output_dir, f'depth_{saved_frame_count:06d}.npz'),
+                            depth=depth_frame
+                        )
+                        saved_frame_count += 1
+                        pbar.update(1)
 
-            depth = depth.to(cur_input.dtype)
-            depth = F.interpolate(depth.flatten(0,1).unsqueeze(1), size=(frame_height, frame_width), mode='bilinear', align_corners=True)
-            depth_list += [depth[i][0].cpu().numpy() for i in range(depth.shape[0])]
+            pre_input = cur_input.clone()
+            del cur_input
+            del depth
 
-            pre_input = cur_input
+            frames_since_clear += len(current_batch)
+            if frames_since_clear >= CLEAR_INTERVAL:
+                # Safe memory clearing
+                if pre_input is not None:
+                    pre_input_cpu = pre_input.cpu()
+                    del pre_input
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    pre_input = pre_input_cpu.to(device)
+                    del pre_input_cpu
+                else:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                frames_since_clear = 0
 
-        del frame_list
+        pbar.close()
+        
+        # Final cleanup
+        if pre_input is not None:
+            del pre_input
+        del all_frames
+        torch.cuda.empty_cache()
         gc.collect()
-
-        depth_list_aligned = []
-        ref_align = []
-        align_len = OVERLAP - INTERP_LEN
-        kf_align_list = KEYFRAMES[:align_len]
-
-        for frame_id in range(0, len(depth_list), INFER_LEN):
-            if len(depth_list_aligned) == 0:
-                depth_list_aligned += depth_list[:INFER_LEN]
-                for kf_id in kf_align_list:
-                    ref_align.append(depth_list[frame_id+kf_id])
-            else:
-                curr_align = []
-                for i in range(len(kf_align_list)):
-                    curr_align.append(depth_list[frame_id+i])
-                scale, shift = compute_scale_and_shift(np.concatenate(curr_align),
-                                                       np.concatenate(ref_align),
-                                                       np.concatenate(np.ones_like(ref_align)==1))
-
-                pre_depth_list = depth_list_aligned[-INTERP_LEN:]
-                post_depth_list = depth_list[frame_id+align_len:frame_id+OVERLAP]
-                for i in range(len(post_depth_list)):
-                    post_depth_list[i] = post_depth_list[i] * scale + shift
-                    post_depth_list[i][post_depth_list[i]<0] = 0
-                depth_list_aligned[-INTERP_LEN:] = get_interpolate_frames(pre_depth_list, post_depth_list)
-
-                for i in range(OVERLAP, INFER_LEN):
-                    new_depth = depth_list[frame_id+i] * scale + shift
-                    new_depth[new_depth<0] = 0
-                    depth_list_aligned.append(new_depth)
-
-                ref_align = ref_align[:1]
-                for kf_id in kf_align_list[1:]:
-                    new_depth = depth_list[frame_id+kf_id] * scale + shift
-                    new_depth[new_depth<0] = 0
-                    ref_align.append(new_depth)
-
-        depth_list = depth_list_aligned
-
-        return np.stack(depth_list[:org_video_len], axis=0), target_fps
-
+        
+        print(f"Processed {frame_count} input frames, saved {saved_frame_count} depth maps")
+        return fps

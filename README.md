@@ -16,6 +16,10 @@ ByteDance
 
 </div>
 
+CUDA <=12.4 
+conda env create -f environment.yml
+conda activate VideoDepthAnything
+
 This work presents **Video Depth Anything** based on [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), which can be applied to arbitrarily long videos without compromising quality, consistency, or generalization ability. Compared with other diffusion-based models, it enjoys faster inference speed, fewer parameters, and higher consistent depth accuracy.
 
 ![teaser](assets/teaser_video_v2.png)

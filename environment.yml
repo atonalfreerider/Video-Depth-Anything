@@ -1,0 +1,23 @@
+name: VideoDepthAnything
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+      - torchvision --index-url https://download.pytorch.org/whl/cu124
+      - torchaudio --index-url https://download.pytorch.org/whl/cu124
+      - xformers --index-url https://download.pytorch.org/whl/cu124
+      - tqdm
+      - opencv-python
+      - numpy
+      - matplotlib
+      - pillow
+      - imageio
+      - imageio-ffmpeg
+      - decord
+      - einops
+      - easydict
+
