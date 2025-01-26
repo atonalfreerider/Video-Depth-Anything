@@ -15,6 +15,7 @@ import argparse
 import numpy as np
 import os
 import torch
+import gc
 
 from video_depth_anything.video_depth import VideoDepthAnything
 from utils.dc_utils import read_video_frames, save_video
@@ -24,14 +25,18 @@ if __name__ == '__main__':
     parser.add_argument('--input_video', type=str, default='./assets/example_videos/davis_rollercoaster.mp4')
     parser.add_argument('--output_dir', type=str, default='./outputs')
     parser.add_argument('--input_size', type=int, default=518)
-    parser.add_argument('--max_res', type=int, default=1280)
-    parser.add_argument('--encoder', type=str, default='vitl', choices=['vits', 'vitl'])
-    parser.add_argument('--max_len', type=int, default=-1, help='maximum length of the input video, -1 means no limit')
+    parser.add_argument('--max_res', type=int, default=1080)
+    parser.add_argument('--encoder', type=str, default='vits', choices=['vits', 'vitl'])
     parser.add_argument('--target_fps', type=int, default=-1, help='target fps of the input video, -1 means the original fps')
 
     args = parser.parse_args()
 
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Create depth output directory
+    video_name = os.path.splitext(os.path.basename(args.input_video))[0]
+    depth_output_dir = os.path.join(args.output_dir, f'{video_name}_depths')
+    os.makedirs(depth_output_dir, exist_ok=True)
 
     model_configs = {
         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -39,21 +44,33 @@ if __name__ == '__main__':
     }
 
     video_depth_anything = VideoDepthAnything(**model_configs[args.encoder])
-    video_depth_anything.load_state_dict(torch.load(f'./checkpoints/video_depth_anything_{args.encoder}.pth', map_location='cpu'), strict=True)
+    video_depth_anything.load_state_dict(
+        torch.load(
+            f'./checkpoints/video_depth_anything_{args.encoder}.pth',
+            map_location='cpu',
+            weights_only=True  # Add safe loading parameter
+        ),
+        strict=True
+    )
     video_depth_anything = video_depth_anything.to(DEVICE).eval()
 
-    frames, target_fps = read_video_frames(args.input_video, args.max_len, args.target_fps, args.max_res)
-    depths, fps = video_depth_anything.infer_video_depth(frames, target_fps, input_size=args.input_size, device=DEVICE)
-    
-    video_name = os.path.basename(args.input_video)
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    fps = video_depth_anything.infer_video_depth(
+        args.input_video, 
+        depth_output_dir,
+        args.target_fps, 
+        input_size=args.input_size, 
+        device=DEVICE
+    )
 
-    processed_video_path = os.path.join(args.output_dir, os.path.splitext(video_name)[0]+'_src.mp4')
-    depth_vis_path = os.path.join(args.output_dir, os.path.splitext(video_name)[0]+'_vis.mp4')
-    save_video(frames, processed_video_path, fps=fps)
-    save_video(depths, depth_vis_path, fps=fps, is_depths=True)
+    # Save FPS information
+    with open(os.path.join(depth_output_dir, 'metadata.txt'), 'w') as f:
+        f.write(f'fps: {fps}\n')
 
-    
+    # Clear final memory
+    del video_depth_anything
+    torch.cuda.empty_cache()
+    gc.collect()
+
+
 
 
