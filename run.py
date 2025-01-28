@@ -16,6 +16,7 @@ import numpy as np
 import os
 import torch
 import gc
+import json
 
 from video_depth_anything.video_depth import VideoDepthAnything
 from utils.dc_utils import read_video_frames, save_video
@@ -28,6 +29,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_res', type=int, default=1080)
     parser.add_argument('--encoder', type=str, default='vits', choices=['vits', 'vitl'])
     parser.add_argument('--target_fps', type=int, default=-1, help='target fps of the input video, -1 means the original fps')
+    parser.add_argument('--poses_json', type=str, default=None, help='Path to poses3d.json')
+    parser.add_argument('--augmented_json_path', type=str, default=None, help='Output path for augmented poses')
 
     args = parser.parse_args()
 
@@ -54,12 +57,19 @@ if __name__ == '__main__':
     )
     video_depth_anything = video_depth_anything.to(DEVICE).eval()
 
+    poses_data = None
+    if args.poses_json:
+        with open(args.poses_json, 'r') as f:
+            poses_data = json.load(f)
+
     fps = video_depth_anything.infer_video_depth(
         args.input_video, 
         depth_output_dir,
         args.target_fps, 
         input_size=args.input_size, 
-        device=DEVICE
+        device=DEVICE,
+        poses_data=poses_data,
+        augmented_json_path=args.augmented_json_path
     )
 
     # Save FPS information
