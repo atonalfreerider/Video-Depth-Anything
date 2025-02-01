@@ -25,6 +25,7 @@ import json
 from .dinov2 import DINOv2
 from .dpt_temporal import DPTHeadTemporal
 from .util.transform import Resize, NormalizeImage, PrepareForNet
+from .depth_analysis import analyze_depth_frame
 
 # infer settings, do not change
 INFER_LEN = 32
@@ -159,20 +160,36 @@ class VideoDepthAnything(nn.Module):
                         str_idx = str(frame_idx)
                         if poses_data and str_idx in poses_data["frames"]:
                             depth_map = depth[i][0].cpu().numpy()
-                            augmented_poses["frames"][str_idx] = []
-                            for pose in poses_data["frames"][str_idx]:
-                                new_pose = pose.copy()
-                                new_pose["joints2d"] = []
-                                for (x, y) in pose["joints2d"]:
-                                    xi, yi = int(round(x)), int(round(y))
-                                    if 0 <= xi < frame_width and 0 <= yi < frame_height:
-                                        d_val = float(depth_map[yi, xi])
-                                    else:
-                                        d_val = 0.0
-                                    new_pose["joints2d"].append([x, y, d_val])
-                                augmented_poses["frames"][str_idx].append(new_pose)
+                            # Perform depth analysis with visualization
+                            analysis_result = analyze_depth_frame(
+                                depth_map, 
+                                frame_height, 
+                                frame_width,
+                                visualize=True  # Enable visualization
+                            )
+                            
+                            # Add analysis to augmented poses if available
+                            if poses_data and str_idx in poses_data["frames"]:
+                                augmented_poses["frames"][str_idx] = []
+                                for pose in poses_data["frames"][str_idx]:
+                                    new_pose = pose.copy()
+                                    new_pose["joints2d"] = []
+                                    for (x, y) in pose["joints2d"]:
+                                        xi, yi = int(round(x)), int(round(y))
+                                        if 0 <= xi < frame_width and 0 <= yi < frame_height:
+                                            d_val = float(depth_map[yi, xi])
+                                        else:
+                                            d_val = 0.0
+                                        new_pose["joints2d"].append([x, y, d_val])
+                                    new_pose["depth_analysis"] = analysis_result
+                                    augmented_poses["frames"][str_idx].append(new_pose)
+                            else:
+                                # If no poses data, create new entry for depth analysis
+                                augmented_poses["frames"][str_idx] = [{
+                                    "depth_analysis": analysis_result
+                                }]
 
-                        last_saved_frame = frame_idx
+                            last_saved_frame = frame_idx
 
                 pre_input = cur_input.clone()
                 del cur_input
