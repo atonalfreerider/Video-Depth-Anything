@@ -67,9 +67,7 @@ if __name__ == '__main__':
         depth_output_dir,
         args.target_fps, 
         input_size=args.input_size, 
-        device=DEVICE,
-        poses_data=poses_data,
-        augmented_json_path=args.augmented_json_path
+        device=DEVICE
     )
 
     # Save FPS information

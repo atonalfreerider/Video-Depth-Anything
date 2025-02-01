@@ -20,12 +20,10 @@ from tqdm import tqdm
 import numpy as np
 import gc
 import os
-import json
 
 from .dinov2 import DINOv2
 from .dpt_temporal import DPTHeadTemporal
 from .util.transform import Resize, NormalizeImage, PrepareForNet
-from .depth_analysis import analyze_depth_frame
 
 # infer settings, do not change
 INFER_LEN = 32
@@ -67,10 +65,7 @@ class VideoDepthAnything(nn.Module):
         depth = 1.0 / (depth + 1e-6)
         return depth.squeeze(1).unflatten(0, (B, T)) # return shape [B, T, H, W]
     
-    def infer_video_depth(
-        self, video_path, output_dir, target_fps, input_size=518, device='cuda',
-        poses_data=None, augmented_json_path=None
-    ):
+    def infer_video_depth(self, video_path, output_dir, target_fps, input_size=518, device='cuda'):
         os.makedirs(output_dir, exist_ok=True)
         
         cap = cv2.VideoCapture(video_path)
@@ -105,12 +100,6 @@ class VideoDepthAnything(nn.Module):
         last_saved_frame = -1
         frames_since_clear = 0
         CLEAR_INTERVAL = 256  # Reduced interval
-
-        # Prepare structure for augmented poses
-        augmented_poses = {
-            "metadata": poses_data["metadata"] if poses_data else {},
-            "frames": {}
-        }
 
         # Set PyTorch memory settings
         torch.cuda.set_per_process_memory_fraction(0.85)
@@ -156,40 +145,12 @@ class VideoDepthAnything(nn.Module):
                         frame_idx = current_frame_idx + i
                         if frame_idx >= total_frames or frame_idx <= last_saved_frame:
                             continue
-                        # Grab 2D pose data, sample depth
-                        str_idx = str(frame_idx)
-                        if poses_data and str_idx in poses_data["frames"]:
-                            depth_map = depth[i][0].cpu().numpy()
-                            # Perform depth analysis with visualization
-                            analysis_result = analyze_depth_frame(
-                                depth_map, 
-                                frame_height, 
-                                frame_width,
-                                visualize=True  # Enable visualization
-                            )
-                            
-                            # Add analysis to augmented poses if available
-                            if poses_data and str_idx in poses_data["frames"]:
-                                augmented_poses["frames"][str_idx] = []
-                                for pose in poses_data["frames"][str_idx]:
-                                    new_pose = pose.copy()
-                                    new_pose["joints2d"] = []
-                                    for (x, y) in pose["joints2d"]:
-                                        xi, yi = int(round(x)), int(round(y))
-                                        if 0 <= xi < frame_width and 0 <= yi < frame_height:
-                                            d_val = float(depth_map[yi, xi])
-                                        else:
-                                            d_val = 0.0
-                                        new_pose["joints2d"].append([x, y, d_val])
-                                    new_pose["depth_analysis"] = analysis_result
-                                    augmented_poses["frames"][str_idx].append(new_pose)
-                            else:
-                                # If no poses data, create new entry for depth analysis
-                                augmented_poses["frames"][str_idx] = [{
-                                    "depth_analysis": analysis_result
-                                }]
-
-                            last_saved_frame = frame_idx
+                        depth_frame = depth[i][0].cpu().numpy()
+                        np.savez_compressed(
+                            os.path.join(output_dir, f'depth_{frame_idx:06d}.npz'),
+                            depth=depth_frame
+                        )
+                        last_saved_frame = frame_idx
 
                 pre_input = cur_input.clone()
                 del cur_input
@@ -221,10 +182,4 @@ class VideoDepthAnything(nn.Module):
             del pre_input
         torch.cuda.empty_cache()
         gc.collect()
-
-        # Write augmented poses to JSON
-        if poses_data and augmented_json_path:
-            with open(augmented_json_path, 'w') as f:
-                json.dump(augmented_poses, f, indent=4)
-
         return fps

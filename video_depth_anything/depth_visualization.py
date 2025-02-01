@@ -24,10 +24,20 @@ def find_intersection_points(floor_spline, wall_eq, x_range, scale_factor, heigh
 
 def plot_depth_analysis(depth_map: np.ndarray, y_coords: np.ndarray, depths_y: np.ndarray, 
                        x_coords: np.ndarray, depths_x: np.ndarray, 
-                       floor_spline, wall_analysis: dict):
-    """Create debug visualization plots for depth analysis."""
+                       floor_spline, wall_analysis: dict, debug: bool = False):
+    """
+    Create visualization plots for depth analysis.
+    
+    Args:
+        ...existing args...
+        debug: If True, show interactive plots. If False, just save plots.
+    """
     try:
-        plt.ion()  # Turn on interactive mode
+        if debug:
+            plt.ion()  # Turn on interactive mode only in debug mode
+        else:
+            plt.ioff()  # Make sure interactive mode is off
+        
         plt.close('all')
         fig = plt.figure(figsize=(15, 5))
         
@@ -166,17 +176,19 @@ def plot_depth_analysis(depth_map: np.ndarray, y_coords: np.ndarray, depths_y: n
         ax3.legend()
         
         plt.tight_layout()
-        fig.canvas.draw()
         
-        # Wait for keypress
-        while True:
-            if plt.waitforbuttonpress():
-                break
-        
-        plt.close(fig)
+        if debug:
+            # Wait for keypress only in debug mode
+            while True:
+                if plt.waitforbuttonpress():
+                    break
+        else:
+            # Just save the plot without showing it
+            plt.savefig('depth_analysis.png')
+            
+        plt.close('all')
         
     except Exception as e:
         print(f"Error in visualization: {str(e)}")
-        plt.close('all')
     finally:
         plt.close('all')
