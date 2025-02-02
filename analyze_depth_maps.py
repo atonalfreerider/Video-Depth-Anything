@@ -39,6 +39,16 @@ def process_depth_maps(depth_dir: str, poses_json: str = None, output_json: str 
         "frames": {}
     }
 
+    def safe_calculate_y(slope, intercept, frame_height):
+        """Safely calculate y coordinate from slope and intercept"""
+        try:
+            if abs(slope) < 1e-6:  # Nearly horizontal line
+                return frame_height // 2
+            y = int((-intercept) / slope)
+            return min(max(y, 0), frame_height - 1)
+        except:
+            return frame_height // 2
+
     # Process each depth map
     for depth_file in tqdm(depth_files, desc="Processing depth maps", dynamic_ncols=True):
         try:
@@ -76,7 +86,6 @@ def process_depth_maps(depth_dir: str, poses_json: str = None, output_json: str 
                     # Add structure lines if analysis was successful
                     if analysis_result["success"]:
                         wall_analysis = analysis_result["wall_analysis"]
-                        floor_analysis = analysis_result["floor_analysis"]
                         
                         # Add wall lines with depth values and boundary checking
                         wall_lines = []
@@ -85,70 +94,77 @@ def process_depth_maps(depth_dir: str, poses_json: str = None, output_json: str 
                             left_eq = wall_analysis["left_equation"]
                             x1, y1 = 0, 0
                             x2 = min(int(wall_analysis["corner"]["x"]), frame_width - 1)
-                            y2 = min(max(int((-left_eq["intercept"]) / left_eq["slope"]), 0), frame_height - 1)
-                            d1 = float(depth_map[y1, x1])
-                            d2 = wall_analysis["corner"]["depth"]
-                            wall_lines.append({
-                                "type": "left_wall",
-                                "start": [x1, y1, d1],
-                                "end": [x2, y2, d2]
-                            })
+                            y2 = safe_calculate_y(left_eq["slope"], left_eq["intercept"], frame_height)
                             
-                            # Right wall line
-                            right_eq = wall_analysis["right_equation"]
-                            x1 = x2  # Use previous end point
-                            y1 = y2
-                            x2 = frame_width - 1
-                            y2 = min(max(int((-right_eq["intercept"]) / right_eq["slope"]), 0), frame_height - 1)
-                            d1 = wall_analysis["corner"]["depth"]
-                            d2 = float(depth_map[y2, x2])
-                            wall_lines.append({
-                                "type": "right_wall",
-                                "start": [x1, y1, d1],
-                                "end": [x2, y2, d2]
-                            })
+                            if y2 is not None:  # Only add wall if y calculation succeeded
+                                d1 = float(depth_map[y1, x1])
+                                d2 = wall_analysis["corner"]["depth"]
+                                wall_lines.append({
+                                    "type": "left_wall",
+                                    "start": [x1, y1, d1],
+                                    "end": [x2, y2, d2]
+                                })
+                            
+                                # Right wall line - only add if left wall was successful
+                                right_eq = wall_analysis["right_equation"]
+                                x1 = x2  # Use previous end point
+                                y1 = y2
+                                x2 = frame_width - 1
+                                y2 = safe_calculate_y(right_eq["slope"], right_eq["intercept"], frame_height)
+                                
+                                if y2 is not None:
+                                    d1 = wall_analysis["corner"]["depth"]
+                                    d2 = float(depth_map[y2, x2])
+                                    wall_lines.append({
+                                        "type": "right_wall",
+                                        "start": [x1, y1, d1],
+                                        "end": [x2, y2, d2]
+                                    })
                         else:
                             # Single wall line
                             eq = wall_analysis["equation"]
                             x1, y1 = 0, 0
                             x2 = frame_width - 1
-                            y2 = min(max(int((-eq["intercept"]) / eq["slope"]), 0), frame_height - 1)
-                            d1 = float(depth_map[y1, x1])
-                            d2 = float(depth_map[y2, x2])
-                            wall_lines.append({
-                                "type": "wall",
-                                "start": [x1, y1, d1],
-                                "end": [x2, y2, d2]
-                            })
+                            y2 = safe_calculate_y(eq["slope"], eq["intercept"], frame_height)
+                            
+                            if y2 is not None:
+                                d1 = float(depth_map[y1, x1])
+                                d2 = float(depth_map[y2, x2])
+                                wall_lines.append({
+                                    "type": "wall",
+                                    "start": [x1, y1, d1],
+                                    "end": [x2, y2, d2]
+                                })
                         
-                        # Add floor line information with boundary checking
-                        floor_points = floor_analysis["points"]
-                        floor_line = {
-                            "type": "floor",
-                            "points": [[
-                                min(max(int(y), 0), frame_height - 1), 
-                                d
-                            ] for y, d in zip(floor_points["y"], floor_points["depths"])]
-                        }
-                        
-                        new_pose["structure_lines"] = {
-                            "wall_lines": wall_lines,
-                            "floor_line": floor_line
-                        }
+                        if wall_lines:  # Only add structure_lines if we have valid walls
+                            new_pose["structure_lines"] = {
+                                "wall_lines": wall_lines
+                            }
                     
                     output_data["frames"][str_idx].append(new_pose)
             else:
-                # Store just the depth analysis
-                output_data["frames"][str_idx].append({
-                    "depth_analysis": analysis_result
-                })
+                # Store just the wall analysis
+                if analysis_result["success"]:
+                    output_data["frames"][str_idx].append({
+                        "depth_analysis": {
+                            "success": True,
+                            "wall_analysis": analysis_result["wall_analysis"]
+                        }
+                    })
+                else:
+                    output_data["frames"][str_idx].append({
+                        "depth_analysis": {
+                            "success": False,
+                            "error": analysis_result.get("error", "Unknown error")
+                        }
+                    })
                 
         except Exception as e:
             print(f"\nError frame {frame_idx}: {str(e)}")
             continue
 
         # Periodically save results to avoid data loss
-        if frame_idx % 100 == 0 and output_json:
+        if frame_idx % 1000 == 0 and output_json:
             with open(output_json + '.temp', 'w') as f:
                 json.dump(output_data, f)
     

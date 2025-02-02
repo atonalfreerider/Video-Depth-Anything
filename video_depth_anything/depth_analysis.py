@@ -109,107 +109,127 @@ def fit_wall_segments(width: int, depth_map: np.ndarray) -> Dict:
     """Fit two segments split at maximum depth point with outlier removal."""
     try:
         x_coords, depths = find_deepest_points(depth_map, 0)
-        x_coords_clean, depths_clean = remove_outliers(x_coords, depths)
+
+        # Check for valid depth values first
+        if np.all(depths == 0) or np.all(np.isnan(depths)):
+            raise ValueError("Invalid depth values")
+
+        # Handle constant depth case
+        if np.allclose(depths, depths[0], rtol=1e-5, atol=1e-5):
+            return {
+                "type": "single_wall",
+                "equation": {
+                    "slope": 0.0,
+                    "intercept": float(depths[0])
+                },
+                "points": {
+                    "x": [0, width-1],
+                    "depths": [float(depths[0]), float(depths[0])]
+                },
+                "corner": {
+                    "x": float(width//2),
+                    "depth": float(depths[0])
+                }
+            }
+
+        try:
+            x_coords_clean, depths_clean = remove_outliers(x_coords, depths)
+        except:
+            # If outlier removal fails, use original points
+            x_coords_clean, depths_clean = x_coords, depths
         
         if len(x_coords_clean) < 3:
-            raise ValueError("Not enough valid points after outlier removal")
+            # Not enough points, use simple max depth point
+            max_depth_idx = np.argmax(depths)
+            return {
+                "type": "single_wall",
+                "equation": {
+                    "slope": 0.0,
+                    "intercept": float(depths[max_depth_idx])
+                },
+                "points": {
+                    "x": [0, width-1],
+                    "depths": [float(depths[max_depth_idx])] * 2
+                },
+                "corner": {
+                    "x": float(x_coords[max_depth_idx]),
+                    "depth": float(depths[max_depth_idx])
+                }
+            }
         
         max_depth_idx = np.argmax(depths_clean)
         max_depth_x = x_coords_clean[max_depth_idx]
         max_depth = depths_clean[max_depth_idx]
         
+        # Ensure we don't divide by zero in slope calculations
+        def safe_linregress(x, y):
+            try:
+                if len(set(x)) <= 1:  # All x values are the same
+                    return 0.0, float(np.mean(y)), 1.0
+                if len(set(y)) <= 1:  # All y values are the same
+                    return 0.0, float(y[0]), 1.0
+                slope, intercept, r_value, _, _ = linregress(x, y)
+                if np.isnan(slope) or np.isinf(slope):
+                    return 0.0, float(np.mean(y)), 0.0
+                return float(slope), float(intercept), float(r_value)
+            except:
+                return 0.0, float(np.mean(y)), 0.0
+
         # Single wall case
         if max_depth_x <= 10 or max_depth_x >= (width - 10):
-            try:
-                slope, intercept, r_value, _, _ = linregress(x_coords_clean, depths_clean)
-                if np.isnan(slope) or np.isnan(intercept) or abs(r_value) < 0.5:
-                    raise ValueError("Poor linear fit")
-                    
-                # Find the maximum depth point along the line
-                x_test = np.array([0, width//2, width-1])
-                depths_test = slope * x_test + intercept
-                corner_x = x_test[np.argmax(depths_test)]
-                corner_depth = float(np.max(depths_clean))  # Use actual max depth instead of computed
-            except Exception:
-                # Fallback to simpler estimation
-                corner_x = float(max_depth_x)
-                corner_depth = float(max_depth)
-                slope = 0.0
-                intercept = corner_depth
-            
+            slope, intercept, r_value = safe_linregress(x_coords_clean, depths_clean)
             return {
                 "type": "single_wall",
                 "equation": {
-                    "slope": float(slope),
-                    "intercept": float(intercept)
+                    "slope": slope,
+                    "intercept": intercept
                 },
                 "points": {
                     "x": x_coords_clean.tolist(),
                     "depths": depths_clean.tolist()
                 },
                 "corner": {
-                    "x": float(corner_x),
-                    "depth": float(corner_depth)
+                    "x": float(max_depth_x),
+                    "depth": float(max_depth)
                 }
             }
         
         # Double wall case
-        try:
-            left_mask = x_coords_clean <= max_depth_x
-            right_mask = x_coords_clean >= max_depth_x
-            
-            # Ensure we have enough points for each segment
-            if np.sum(left_mask) < 3 or np.sum(right_mask) < 3:
-                raise ValueError("Not enough points for double wall fit")
-            
-            # Fit left wall
-            left_x = x_coords_clean[left_mask]
-            left_depths = depths_clean[left_mask]
-            left_slope, left_intercept, left_r, _, _ = linregress(left_x, left_depths)
-            
-            # Fit right wall
-            right_x = x_coords_clean[right_mask]
-            right_depths = depths_clean[right_mask]
-            right_slope, right_intercept, right_r, _, _ = linregress(right_x, right_depths)
-            
-            # Check for valid fits
-            if (np.isnan(left_slope) or np.isnan(right_slope) or 
-                abs(left_r) < 0.5 or abs(right_r) < 0.5):
-                raise ValueError("Poor linear fits")
-            
-            # Calculate intersection point with checks
-            if abs(left_slope - right_slope) < 1e-6:
+        left_mask = x_coords_clean <= max_depth_x
+        right_mask = x_coords_clean >= max_depth_x
+        
+        left_slope, left_intercept, left_r = safe_linregress(
+            x_coords_clean[left_mask], 
+            depths_clean[left_mask]
+        )
+        
+        right_slope, right_intercept, right_r = safe_linregress(
+            x_coords_clean[right_mask], 
+            depths_clean[right_mask]
+        )
+        
+        # Safe intersection calculation
+        if abs(left_slope - right_slope) < 1e-6:
+            x_int = max_depth_x
+        else:
+            x_int = (right_intercept - left_intercept) / (left_slope - right_slope)
+            if np.isnan(x_int) or np.isinf(x_int) or x_int < 0 or x_int >= width:
                 x_int = max_depth_x
-            else:
-                x_int = (right_intercept - left_intercept) / (left_slope - right_slope)
-                if x_int < 0 or x_int >= width:
-                    x_int = max_depth_x
-            
-            corner_depth = float(max_depth)  # Use actual maximum depth
-            
-        except Exception:
-            # Fallback to single point estimation
-            x_int = float(max_depth_x)
-            corner_depth = float(max_depth)
-            left_slope = 0.0
-            right_slope = 0.0
-            left_intercept = corner_depth
-            right_intercept = corner_depth
         
         return {
             "type": "double_wall",
             "wall_intersection_x": float(x_int),
             "corner": {
                 "x": float(x_int),
-                "depth": float(corner_depth)
+                "depth": float(max_depth)
             },
             "left_equation": {
-                "slope": float(left_slope),
-                "intercept": float(left_intercept)
+                "slope": left_slope,
+                "intercept": left_intercept
             },
             "right_equation": {
-                "slope": float(right_slope),
-                "intercept": float(right_intercept)
+                "slope": right_slope,
+                "intercept": right_intercept
             },
             "points": {
                 "x": x_coords_clean.tolist(),
@@ -218,22 +238,22 @@ def fit_wall_segments(width: int, depth_map: np.ndarray) -> Dict:
         }
         
     except Exception as e:
-        # Ultimate fallback - return a flat wall at maximum depth
-        max_depth_point = np.unravel_index(np.argmax(depth_map), depth_map.shape)
-        max_depth = float(depth_map[max_depth_point])
+        print(f"Wall fitting error: {str(e)}")
+        # Ultimate fallback - return a flat wall
+        flat_depth = float(np.mean(depth_map[depth_map > 0]) if np.any(depth_map > 0) else 1.0)
         return {
             "type": "single_wall",
             "equation": {
                 "slope": 0.0,
-                "intercept": max_depth
+                "intercept": flat_depth
             },
             "points": {
                 "x": [0, width-1],
-                "depths": [max_depth, max_depth]
+                "depths": [flat_depth, flat_depth]
             },
             "corner": {
                 "x": float(width//2),
-                "depth": max_depth
+                "depth": flat_depth
             }
         }
 
