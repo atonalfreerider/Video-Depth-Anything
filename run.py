@@ -31,13 +31,21 @@ if __name__ == '__main__':
     parser.add_argument('--target_fps', type=int, default=-1, help='target fps of the input video, -1 means the original fps')
     parser.add_argument('--poses_json', type=str, default=None, help='Path to poses3d.json')
     parser.add_argument('--augmented_json_path', type=str, default=None, help='Output path for augmented poses')
+    parser.add_argument('--output_analysis', type=str, default=None, help='Output path for depth analysis JSON')
+    parser.add_argument('--output_viz', type=str, default=None, help='Output path for visualization video')
 
     args = parser.parse_args()
 
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Create depth output directory
+    # Create output paths based on input video if not specified
     video_name = os.path.splitext(os.path.basename(args.input_video))[0]
+    if not args.output_analysis:
+        args.output_analysis = os.path.join(args.output_dir, f'{video_name}_depth_analysis.json')
+    if not args.output_viz:
+        args.output_viz = os.path.join(args.output_dir, f'{video_name}_visualization.mp4')
+
+    # Create depth output directory
     depth_output_dir = os.path.join(args.output_dir, f'{video_name}_depths')
     os.makedirs(depth_output_dir, exist_ok=True)
 
@@ -70,9 +78,28 @@ if __name__ == '__main__':
         device=DEVICE
     )
 
-    # Save FPS information
-    with open(os.path.join(depth_output_dir, 'metadata.txt'), 'w') as f:
-        f.write(f'fps: {fps}\n')
+    # Save metadata
+    metadata = {
+        'fps': fps,
+        'frame_height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        'frame_width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    }
+    
+    with open(os.path.join(depth_output_dir, 'video_metadata.json'), 'w') as f:
+        json.dump(metadata, f)
+
+    # Run analysis and visualization
+    from visualize_analysis import create_visualization
+    
+    create_visualization(
+        video_path=args.input_video,
+        depth_dir=depth_output_dir,
+        poses_json=args.poses_json,
+        output_video=args.output_viz,
+        output_analysis=args.output_analysis,
+        depth_alpha=0.3,
+        line_alpha=0.7
+    )
 
     # Clear final memory
     del video_depth_anything
